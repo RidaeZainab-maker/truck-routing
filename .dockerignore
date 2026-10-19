@@ -1,0 +1,15 @@
+.git
+**/.git
+**/node_modules
+**/.venv
+**/venv
+**/.env
+**/dist
+**/__pycache__
+**/*.pyc
+**/db.sqlite3
+**/staticfiles
+**/._*
+**/.DS_Store
+hf-space
+render.yaml

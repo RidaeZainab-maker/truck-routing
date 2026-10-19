@@ -4,7 +4,8 @@ import Directions from './Directions'
 import { LEVELS, RISK_COLORS, enrichSteps, scoreRoutes } from './risk'
 import './App.css'
 
-const API = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+// VITE_API_URL unset -> local Django dev server; set to '' -> same origin (single-container build).
+const API = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
 const PROVIDER_LABEL = { 'ors-hgv': 'ORS truck (HGV)', 'osrm-car': 'OSRM car' }
 
 const toLocalInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)

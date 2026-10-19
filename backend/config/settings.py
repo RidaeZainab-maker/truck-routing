@@ -125,6 +125,32 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
+}
+
+# Single-container deploy (Docker / Hugging Face Space): Django also serves the built
+# React app. Enabled only when FRONTEND_DIST points at an existing Vite build, so local
+# dev (Vite on :5173 talking to Django on :8000) is unchanged.
+_frontend_dist = os.getenv('FRONTEND_DIST', '').strip()
+FRONTEND_DIST = Path(_frontend_dist).resolve() if _frontend_dist else None
+if FRONTEND_DIST and not (FRONTEND_DIST / 'index.html').is_file():
+    FRONTEND_DIST = None
+if FRONTEND_DIST:
+    WHITENOISE_ROOT = FRONTEND_DIST  # /assets/*.js, /favicon.svg, ... served at the site root
+    # Vite emits content-hashed names under /assets/, so they can be cached forever.
+    WHITENOISE_IMMUTABLE_FILE_TEST = lambda path, url: url.startswith('/assets/')  # noqa: E731
+
+# WhiteNoise serves collected /static/ (and the SPA above) in production. Dev with
+# DEBUG=True keeps Django's own static handling, so `runserver` behaves as before.
+if FRONTEND_DIST or not DEBUG:
+    MIDDLEWARE.insert(MIDDLEWARE.index('django.middleware.security.SecurityMiddleware') + 1,
+                      'whitenoise.middleware.WhiteNoiseMiddleware')
+
+# Behind the Hugging Face / Render HTTPS proxy.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+CSRF_TRUSTED_ORIGINS = [o.strip().rstrip('/') for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()]
 
 
 # Email
