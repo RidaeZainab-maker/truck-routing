@@ -18,3 +18,5 @@ backend/staticfiles/
 /uv.lock
 .vercel
 .env.local
+# macOS metadata files
+._*
