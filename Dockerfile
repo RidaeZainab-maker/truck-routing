@@ -1,5 +1,5 @@
 # Single-container build: Django API + built React app on one port.
-# Target: Hugging Face Docker Space (app_port 7860, runs as uid 1000). Also runs anywhere:
+# Optional alternative to the Vercel deploy (any Docker host; listens on 7860, runs as uid 1000):
 #   docker build -t saferoute . && docker run -p 7860:7860 -e ORS_API_KEY=... saferoute
 
 # ---- 1. Build the React (Vite) frontend ----

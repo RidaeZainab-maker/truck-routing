@@ -23,13 +23,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
+# Running as a Vercel Function (Vercel sets VERCEL=1). Production defaults; the
+# filesystem there is read-only except /tmp.
+ON_VERCEL = bool(os.getenv('VERCEL'))
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-66ycd2uv^)a@pdxhs4o1^y#t#b=%1oui%m#ef9a3p)#@sym+0_')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DJANGO_DEBUG', 'True').lower() in ('1', 'true', 'yes')
+DEBUG = os.getenv('DJANGO_DEBUG', 'False' if ON_VERCEL else 'True').lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if h.strip()]
+_default_hosts = '.vercel.app,localhost,127.0.0.1' if ON_VERCEL else 'localhost,127.0.0.1'
+ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', _default_hosts).split(',') if h.strip()]
 
 
 # Application definition
@@ -84,7 +89,8 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        # The API itself never touches the DB; on Vercel keep sqlite in writable /tmp.
+        'NAME': os.getenv('SQLITE_PATH') or ('/tmp/db.sqlite3' if ON_VERCEL else BASE_DIR / 'db.sqlite3'),
     }
 }
 
@@ -142,15 +148,17 @@ if FRONTEND_DIST:
     # Vite emits content-hashed names under /assets/, so they can be cached forever.
     WHITENOISE_IMMUTABLE_FILE_TEST = lambda path, url: url.startswith('/assets/')  # noqa: E731
 
-# WhiteNoise serves collected /static/ (and the SPA above) in production. Dev with
-# DEBUG=True keeps Django's own static handling, so `runserver` behaves as before.
-if FRONTEND_DIST or not DEBUG:
+# WhiteNoise serves collected /static/ (and the SPA above) in production (Docker/Render).
+# Dev with DEBUG=True keeps Django's own static handling, so `runserver` behaves as
+# before; on Vercel the static frontend is served by Vercel's CDN, not Django.
+if FRONTEND_DIST or (not DEBUG and STATIC_ROOT.is_dir()):
     MIDDLEWARE.insert(MIDDLEWARE.index('django.middleware.security.SecurityMiddleware') + 1,
                       'whitenoise.middleware.WhiteNoiseMiddleware')
 
-# Behind the Hugging Face / Render HTTPS proxy.
+# Behind an HTTPS proxy (Vercel / Render / Docker hosts).
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-CSRF_TRUSTED_ORIGINS = [o.strip().rstrip('/') for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()]
+_default_csrf = 'https://*.vercel.app' if ON_VERCEL else ''
+CSRF_TRUSTED_ORIGINS = [o.strip().rstrip('/') for o in os.getenv('CSRF_TRUSTED_ORIGINS', _default_csrf).split(',') if o.strip()]
 
 
 # Email
