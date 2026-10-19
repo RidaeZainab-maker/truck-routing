@@ -381,7 +381,12 @@ class StepTests(SimpleTestCase):
         self.assertEqual(steps.osrm_instruction(mk('roundabout', 'right', name='Oak Ave', m={'exit': 2})),
                          'At the roundabout, take exit 2 onto Oak Ave')
         self.assertEqual(steps.osrm_instruction(mk('turn', 'uturn', name='')), 'Make a U-turn')
-        self.assertEqual(steps.osrm_maneuver(mk('off ramp', 'right')), 'exit')
+        self.assertEqual(steps.osrm_maneuver(mk('off ramp', 'right')), 'exit-right')
+        self.assertEqual(steps.osrm_maneuver(mk('off ramp', 'slight left')), 'exit-left')
+        self.assertEqual(steps.osrm_maneuver(mk('off ramp', '')), 'exit-right')
+        self.assertEqual(steps.osrm_maneuver(mk('merge', 'slight left')), 'merge-left')
+        self.assertEqual(steps.osrm_maneuver(mk('on ramp', 'straight')), 'merge')
+        self.assertEqual(steps.osrm_maneuver(mk('fork', 'slight right')), 'keep-right')
         self.assertEqual(steps.osrm_maneuver(mk('turn', 'sharp left')), 'sharp-left')
 
     def test_osrm_steps_multi_leg(self):
@@ -395,3 +400,107 @@ class StepTests(SimpleTestCase):
         self.assertEqual(out[1]['instruction'], 'Turn left onto B')
         self.assertEqual(out[1]['span'], [2, 3])
         self.assertEqual(out[0]['span'], [0, 2])
+
+
+class ManeuverConsistencyTests(SimpleTestCase):
+    """The icon is drawn from maneuver_type, the banner shows the text: they must agree."""
+
+    def test_ors_type_codes(self):
+        # https://giscience.github.io/openrouteservice/api-reference/endpoints/directions/instruction-types
+        self.assertEqual([steps.ORS_TYPES[i] for i in (0, 1, 2, 3, 4, 5, 6, 12, 13)],
+                         ['left', 'right', 'sharp-left', 'sharp-right', 'slight-left', 'slight-right',
+                          'straight', 'keep-left', 'keep-right'])
+
+    def test_reconcile_text_wins(self):
+        r = steps.reconcile
+        self.assertEqual(r('Turn right onto West Magnolia Avenue', 'left'), 'right')
+        self.assertEqual(r('Turn left onto Hemphill Street', 'right'), 'left')
+        self.assertEqual(r('Keep right', 'keep-left'), 'keep-right')
+        self.assertEqual(r('Turn sharp left onto South Freeway', 'sharp-right'), 'sharp-left')
+        self.assertEqual(r('At the end of the road, turn left onto Elm St', 'right'), 'left')
+        self.assertEqual(r('Merge left onto I-35', 'merge'), 'merge-left')
+        self.assertEqual(r('Turn slight right', 'straight'), 'slight-right')
+
+    def test_reconcile_leaves_consistent_steps(self):
+        r = steps.reconcile
+        self.assertEqual(r('Turn right onto Left Fork Road', 'right'), 'right')  # road name is not the verb
+        self.assertEqual(r('Continue onto Right Lane Rd', 'straight'), 'straight')
+        self.assertEqual(r('Arrive at your destination, on the left', 'arrive'), 'arrive')
+        self.assertEqual(r('Make a U-turn', 'uturn'), 'uturn')
+        self.assertEqual(r('Take the exit toward Waco', 'exit-right'), 'exit-right')
+        self.assertEqual(r('', 'left'), 'left')
+
+    def test_from_ors_fixes_contradicting_type(self):
+        geom = [[0, 0], [0, 1], [1, 1]]
+        seg = [{'steps': [{'type': 0, 'instruction': 'Turn right onto West Magnolia Avenue', 'name': 'W Magnolia',
+                           'distance': 10, 'duration': 1, 'way_points': [1, 2]}]}]
+        self.assertEqual(steps.from_ors(seg, geom)[0]['maneuver_type'], 'right')
+
+    def test_osrm_text_and_type_agree(self):
+        mk = lambda typ, mod: {'maneuver': {'type': typ, 'modifier': mod, 'location': [0, 0]}, 'name': 'X'}
+        for typ in ('turn', 'end of road', 'fork', 'continue', 'off ramp', 'merge'):
+            for mod in ('left', 'right', 'slight left', 'slight right', 'sharp left', 'sharp right'):
+                s = mk(typ, mod)
+                text, mtype = steps.osrm_instruction(s).lower(), steps.reconcile(steps.osrm_instruction(s), steps.osrm_maneuver(s))
+                side = 'left' if 'left' in mod else 'right'
+                self.assertIn(side, mtype, (typ, mod, text, mtype))
+                self.assertNotIn('right' if side == 'left' else 'left', text.split(' onto ')[0], (typ, mod, text))
+
+
+class OpenMeteoRetryTests(SimpleTestCase):
+    def _resp(self, code, retry_after=None):
+        r = mock.Mock(status_code=code, headers={'Retry-After': retry_after} if retry_after else {})
+        r.json.return_value = [{'hourly': {}}]
+        if code >= 400:
+            r.raise_for_status.side_effect = requests.HTTPError(response=r)
+        else:
+            r.raise_for_status.return_value = None
+        return r
+
+    def test_backoff(self):
+        self.assertEqual(weather._backoff(0), 1.5)
+        self.assertEqual(weather._backoff(1), 3.0)
+        self.assertEqual(weather._backoff(0, '2'), 2.0)
+        self.assertEqual(weather._backoff(0, '120'), weather.MAX_BACKOFF_S)  # capped
+        self.assertEqual(weather._backoff(1, 'Wed, 21 Oct 2026 07:28:00 GMT'), 3.0)
+
+    def test_retries_429_then_succeeds(self):
+        calls = [self._resp(429, '1'), self._resp(429), self._resp(200)]
+        with mock.patch.object(weather.HTTP, 'get', side_effect=calls) as get, \
+                mock.patch.object(weather.time, 'sleep') as sleep:
+            self.assertEqual(weather._fetch([1], [2]), [{'hourly': {}}])
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [1.0, 3.0])  # Retry-After, then backoff
+
+    def test_retries_timeout_then_succeeds(self):
+        with mock.patch.object(weather.HTTP, 'get', side_effect=[requests.ReadTimeout(), self._resp(200)]), \
+                mock.patch.object(weather.time, 'sleep'):
+            self.assertEqual(weather._fetch([1], [2]), [{'hourly': {}}])
+
+    def test_gives_up_with_http_error(self):
+        with mock.patch.object(weather.HTTP, 'get', return_value=self._resp(429)) as get, \
+                mock.patch.object(weather.time, 'sleep'):
+            with self.assertRaises(requests.HTTPError):
+                weather._fetch([1], [2])
+        self.assertEqual(get.call_count, weather.FETCH_ATTEMPTS)
+
+    def test_no_retry_on_client_error(self):
+        with mock.patch.object(weather.HTTP, 'get', return_value=self._resp(400)) as get, \
+                mock.patch.object(weather.time, 'sleep') as sleep:
+            with self.assertRaises(requests.HTTPError):
+                weather._fetch([1], [2])
+        self.assertEqual(get.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_view_reports_status_code(self):
+        r = self._resp(429)
+        with mock.patch('routing.services.ors.geocode_pair', return_value=((-97, 32), (-96, 33))), \
+                mock.patch('routing.services.ors.get_routes', return_value=[{
+                    'geometry': [[-97, 32], [-96, 33]], 'distance_m': 1000, 'duration_s': 60, 'steps': []}]), \
+                mock.patch('routing.services.weather.get_forecasts', side_effect=requests.HTTPError(response=r)):
+            res = APIClient().post('/api/routes', {'origin': 'A', 'destination': 'B',
+                                                   'departure': '2026-10-19T09:00:00Z', 'load_weight_lb': 1000},
+                                   format='json')
+        self.assertEqual(res.status_code, 502)
+        self.assertIn('HTTPError 429', res.json()['error'])
+        self.assertIn('rate limited', res.json()['error'])

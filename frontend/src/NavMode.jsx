@@ -3,12 +3,14 @@ import L from 'leaflet'
 import { useMap } from 'react-leaflet'
 import { RISK_COLORS } from './risk'
 import {
-  ARROWS, announceThresholds, buildTrack, currentStep, fmtDist, nextManeuver, pointAt, snapToTrack,
-  stepMiles, upcomingCheckpoint,
+  announceThresholds, buildTrack, currentStep, fmtDist, geometryKey, nextManeuver, pointAt, resumeMile,
+  snapToTrack, stepMiles, unwrapAngle, upcomingCheckpoint,
 } from './nav'
+import TurnIcon from './TurnIcon'
 
 const SPEEDS = [1, 10, 60, 300]
 const NAV_ZOOM = 17
+const TURN_RATE = 12     // marker rotation easing (1/s); replaces a CSS transition that spun the long way at 359->0
 const UI_MS = 250        // banner/bottom bar refresh (React state)
 const LINE_MS = 200      // travelled/ahead polyline refresh
 const fmtTime = (d) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -33,10 +35,18 @@ function say(text, muted) {
  */
 export default function NavMode({ route, departure, offsetH, onStep, onExit }) {
   const map = useMap()
-  const track = useMemo(() => buildTrack(route.geometry), [route.geometry])
+  // The track (and with it the marker, the drawn nav line and the step miles) is rebuilt
+  // only when the polyline itself changes. A re-plan that returns the same route (e.g. a
+  // different checkpoint interval) keeps the trip going instead of restarting it.
+  const gkey = geometryKey(route.geometry)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const track = useMemo(() => buildTrack(route.geometry), [gkey])
   const miles = useMemo(() => stepMiles(track, route.steps), [track, route.steps])
   const pace = (route.distance_mi / Math.max(route.duration_s, 1)) // real mi per second
   const scaleMi = route.distance_mi / Math.max(track.total, 1e-9) // track miles -> reported route miles
+  // Latest steps/checkpoints/pace for the animation loop, without restarting it.
+  const data = useRef(null)
+  useEffect(() => { data.current = { route, miles, pace, scaleMi } })
 
   const [playing, setPlaying] = useState(true)
   const [mult, setMult] = useState(10)
@@ -60,14 +70,20 @@ export default function NavMode({ route, departure, offsetH, onStep, onExit }) {
 
   useEffect(() => {
     const st = live.current
-    st.mile = 0
+    data.current = data.current || { route, miles, pace, scaleMi }
+    // New polyline while already driving (re-plan): continue from where the truck is if
+    // the new route passes there, otherwise start over from its beginning.
+    const resumed = st.pos ? resumeMile(track, st.pos[0], st.pos[1]) : null
+    st.mile = resumed ?? 0
+    st.rot = null
+    const pts = track.pts // the one geometry used for the marker AND every nav line
     const pane = map.getPane('nav') || map.createPane('nav')
     pane.style.zIndex = 430
     const travelled = L.polyline([], { pane: 'nav', color: '#475569', weight: 7, opacity: 0.75, interactive: false }).addTo(map)
-    const ahead = L.polyline(route.geometry, { pane: 'nav', color: '#1a73e8', weight: 9, opacity: 0.95, interactive: false }).addTo(map)
-    const casing = L.polyline(route.geometry, { pane: 'nav', color: '#0b3d91', weight: 13, opacity: 0.5, interactive: false })
+    const ahead = L.polyline(pts, { pane: 'nav', color: '#1a73e8', weight: 9, opacity: 0.95, interactive: false }).addTo(map)
+    const casing = L.polyline(pts, { pane: 'nav', color: '#0b3d91', weight: 13, opacity: 0.5, interactive: false })
     casing.addTo(map); ahead.bringToFront()
-    const start = pointAt(track, 0)
+    const start = pointAt(track, st.mile)
     const marker = L.marker([start.lat, start.lon], { icon: truckIcon(), interactive: false, zIndexOffset: 1000 }).addTo(map)
     const camera = (lat, lon, animate) => {
       // Keep the truck in the visible area right of the side panel, slightly below centre.
@@ -75,54 +91,61 @@ export default function NavMode({ route, departure, offsetH, onStep, onExit }) {
       const c = map.unproject(map.project([lat, lon], z).subtract([225, 110]), z)
       map.setView(c, z, { animate })
     }
-    map.setZoom(NAV_ZOOM, { animate: false })
+    if (resumed == null) {
+      map.setZoom(NAV_ZOOM, { animate: false })
+      say(`Starting navigation. ${data.current.route.steps[0]?.instruction || ''}`, st.muted)
+    }
     camera(start.lat, start.lon, false)
-    say(`Starting navigation. ${route.steps[0]?.instruction || ''}`, st.muted)
 
     const announced = new Set(), warned = new Set()
     let raf, last = performance.now(), lastLine = 0, lastUi = 0, lastStep = -1
     const frame = (now) => {
+      const { route: rt, miles: ms, pace: pc, scaleMi: sc } = data.current
       const dt = Math.min((now - last) / 1000, 0.25)
       last = now
-      if (st.playing && !st.gps) st.mile = Math.min(track.total, st.mile + (pace / scaleMi) * st.mult * dt)
+      if (st.playing && !st.gps) st.mile = Math.min(track.total, st.mile + (pc / sc) * st.mult * dt)
       const p = pointAt(track, st.mile)
       st.idx = p.idx
-      marker.setLatLng([p.lat, p.lon])
+      st.pos = [p.lat, p.lon]
+      marker.setLatLng(st.pos)
+      // Rotate along the shortest way (unwrapped angle), eased here instead of in CSS.
+      const goal = unwrapAngle(st.rot, st.gps && st.gpsHeading != null ? st.gpsHeading : p.heading)
+      st.rot = st.rot == null ? goal : st.rot + (goal - st.rot) * Math.min(1, dt * TURN_RATE)
       const el = marker.getElement()?.firstChild
-      if (el) el.style.transform = `rotate(${st.gps && st.gpsHeading != null ? st.gpsHeading : p.heading}deg)`
+      if (el) el.style.transform = `rotate(${st.rot}deg)`
       camera(p.lat, p.lon, false)
 
       if (now - lastLine > LINE_MS) {
         lastLine = now
-        travelled.setLatLngs([...route.geometry.slice(0, p.idx + 1), [p.lat, p.lon]])
-        const rest = [[p.lat, p.lon], ...route.geometry.slice(p.idx + 1)]
+        travelled.setLatLngs([...pts.slice(0, p.idx + 1), st.pos])
+        const rest = [st.pos, ...pts.slice(p.idx + 1)]
         ahead.setLatLngs(rest); casing.setLatLngs(rest)
       }
 
       // Voice: early (~0.5 mi) and at-the-turn announcements, scaled with sim speed.
-      const speed = (pace / scaleMi) * (st.gps ? 1 : st.mult)
+      const speed = (pc / sc) * (st.gps ? 1 : st.mult)
       const th = announceThresholds(speed)
-      const nx = nextManeuver(miles, st.mile)
+      const nx = nextManeuver(ms, st.mile)
       if (nx) {
-        const s = route.steps[nx.index]
+        const s = rt.steps[nx.index]
         if (nx.distance <= th.early && nx.distance > th.now && !announced.has(`e${nx.index}`)) {
           announced.add(`e${nx.index}`)
-          say(`In ${fmtDist(nx.distance * scaleMi).replace('mi', 'miles').replace('ft', 'feet')}, ${s.instruction}`, st.muted)
+          say(`In ${fmtDist(nx.distance * sc).replace('mi', 'miles').replace('ft', 'feet')}, ${s.instruction}`, st.muted)
         } else if (nx.distance <= th.now && !announced.has(`n${nx.index}`)) {
           announced.add(`n${nx.index}`); announced.add(`e${nx.index}`)
           say(s.instruction, st.muted)
         }
       }
       // Weather warning before a Moderate+ checkpoint.
-      const cp = upcomingCheckpoint(route.cps, st.mile * scaleMi)
-      if (cp && cp.level !== 'Low' && !warned.has(cp.mile) && cp.mile - st.mile * scaleMi <= Math.max(5, speed * scaleMi * 10)) {
+      const cp = upcomingCheckpoint(rt.cps, st.mile * sc)
+      if (cp && cp.level !== 'Low' && !warned.has(cp.mile) && cp.mile - st.mile * sc <= Math.max(5, speed * sc * 10)) {
         warned.add(cp.mile)
         setToast({ level: cp.level, text: `${cp.level} weather risk ahead at mile ${cp.mile} — wind ${cp.weather.wind_mph} mph, rain ${cp.weather.rain_in_hr} in/hr, snow ${cp.weather.snow_in_hr} in/hr` })
         say(`Caution: ${cp.level} weather risk ahead`, st.muted)
         window.setTimeout(() => setToast(null), 5000)
       }
 
-      const k = currentStep(miles, st.mile)
+      const k = currentStep(ms, st.mile)
       if (k !== lastStep) { lastStep = k; onStepRef.current?.(k) }
       if (now - lastUi > UI_MS) { lastUi = now; setUi({ mile: st.mile, wall: Date.now() }) }
       if (st.mile >= track.total && !announced.has('end')) { announced.add('end'); say('You have arrived at your destination', st.muted); setPlaying(false) }
@@ -134,7 +157,9 @@ export default function NavMode({ route, departure, offsetH, onStep, onExit }) {
       ;[travelled, ahead, casing, marker].forEach((l) => l.remove())
       window.speechSynthesis?.cancel()
     }
-  }, [map, route, track, miles, pace, scaleMi])
+    // Only a new map or a new polyline restarts the loop; steps/cps/pace are read from `data`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, track])
 
   // Optional real GPS (works on devices with location; the sim pauses while it is on).
   useEffect(() => {
@@ -158,12 +183,12 @@ export default function NavMode({ route, departure, offsetH, onStep, onExit }) {
   return (
     <div ref={uiRef} className="nav-ui">
       <div className="nav-banner">
-        <div className="nav-arrow">{ARROWS[step?.maneuver_type] || '↑'}</div>
+        <div className="nav-arrow"><TurnIcon step={nx ? step : { maneuver_type: 'arrive' }} size={50} /></div>
         <div className="nav-main">
           <div className="nav-dist">{nx ? `In ${fmtDist(nx.distance * scaleMi)}` : 'Arrived'}</div>
           <div className="nav-instr">{step?.instruction || 'Destination'}</div>
         </div>
-        {then && <div className="nav-then">Then {ARROWS[then.maneuver_type] || '↑'} {then.instruction}</div>}
+        {then && <div className="nav-then">Then <TurnIcon step={then} size={15} /> {then.instruction}</div>}
       </div>
 
       {toast && <div className="nav-toast" style={{ borderColor: RISK_COLORS[toast.level] }}>⚠ {toast.text}</div>}

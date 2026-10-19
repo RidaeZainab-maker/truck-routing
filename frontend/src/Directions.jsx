@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { RISK_COLORS } from './risk'
-import { ARROWS } from './nav'
+import TurnIcon from './TurnIcon'
 
 const fmtTime = (d) => d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
 const fmtMi = (mi) => (mi < 0.1 ? `${Math.round(mi * 5280)} ft` : `${mi.toFixed(mi < 10 ? 1 : 0)} mi`)
@@ -19,7 +19,7 @@ export default function Directions({ steps, focus, current, onFocus, onBack }) {
         {steps.map((s, k) => (
           <li key={k} ref={k === current ? curRef : null} className={`${k === focus ? 'on' : ''} ${k === current ? 'cur' : ''}`}>
             <button type="button" onClick={() => onFocus(k)}>
-              <span className="arrow" style={{ borderColor: RISK_COLORS[s.level] }}>{ARROWS[s.maneuver_type] || '↑'}</span>
+              <span className="arrow" style={{ borderColor: RISK_COLORS[s.level] }}><TurnIcon step={s} size={19} /></span>
               <span className="step-body">
                 <span className="step-text"><b className="muted">{k + 1}.</b> {s.instruction}</span>
                 <span className="step-meta mono">

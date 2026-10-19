@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import RouteMap from './RouteMap'
 import Directions from './Directions'
 import { LEVELS, RISK_COLORS, enrichSteps, scoreRoutes } from './risk'
+import { geometryKey } from './nav'
 import './App.css'
 
 // VITE_API_URL unset -> local Django dev server; set to '' -> same origin (single-container build).
@@ -69,13 +70,22 @@ export default function App() {
 
   const update = (key) => (e) => setForm({ ...form, [key]: e.target.value })
 
+  // Only the newest plan may land: clicking 10 -> 25 -> 50 fires three requests whose
+  // answers can arrive out of order; older ones are aborted and ignored.
+  const planReq = useRef(null)
   const plan = async (every = interval) => {
+    planReq.current?.abort()
+    const req = new AbortController()
+    planReq.current = req
+    // While navigating, stay on the route being driven if the new plan still has it.
+    const keepKey = navigating && result?.routes[selected] ? geometryKey(result.routes[selected].geometry) : null
     setLoading(true)
     setError('')
     try {
       const res = await fetch(`${API}/api/routes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: req.signal,
         body: JSON.stringify({
           origin: form.origin, destination: form.destination,
           departure: new Date(form.departure).toISOString(),
@@ -83,15 +93,17 @@ export default function App() {
         }),
       })
       const data = await res.json()
+      if (planReq.current !== req) return
       if (!res.ok) throw new Error(data.error || JSON.stringify(data))
+      const kept = keepKey ? data.routes.findIndex((r) => geometryKey(r.geometry) === keepKey) : -1
       setResult(data)
       setFocusStep(null)
       setOffset(0)
-      setSelected(data.recommended_route_index)
+      setSelected(kept >= 0 ? kept : data.recommended_route_index)
     } catch (err) {
-      setError(err.message)
+      if (planReq.current === req && err.name !== 'AbortError') setError(err.message)
     } finally {
-      setLoading(false)
+      if (planReq.current === req) setLoading(false)
     }
   }
 

@@ -25,13 +25,16 @@ const ORIGIN_ICON = pin('pin-a', 'A')
 const DEST_ICON = pin('pin-b', 'B')
 const STEP_ICON = L.divIcon({ className: '', html: '<div class="step-pin"></div>', iconSize: [22, 22], iconAnchor: [11, 11] })
 
-// Fit to all routes when a new plan arrives or the user selects a route.
-function FitBounds({ routes, fitNonce }) {
+// Fit to all routes when a new plan arrives or the user selects a route. Not while
+// navigating: the nav camera owns the view then, and a fly-to started by a re-plan would
+// fight it (and could leave the map at a fractional zoom).
+function FitBounds({ routes, fitNonce, navigating }) {
   const map = useMap()
   useEffect(() => {
+    if (navigating) return
     const pts = routes.flatMap((r) => r.geometry)
     if (pts.length) map.flyToBounds(pts, { ...PANEL_PAD, duration: 0.6 })
-  }, [routes, fitNonce, map])
+  }, [routes, fitNonce, map, navigating])
   useEffect(() => { if (import.meta.env.DEV) window.__saferouteMap = map }, [map]) // e2e screenshot hook
   return null
 }
@@ -95,7 +98,7 @@ export default function RouteMap({ result, scored, selected, onSelect, focusStep
       </Pane>
       <ZoomControl position="bottomright" />
       <ScaleControl position="bottomright" imperial metric={false} />
-      <FitBounds routes={routes} fitNonce={fitNonce} />
+      <FitBounds routes={routes} fitNonce={fitNonce} navigating={navigating} />
       <FlyToStep step={focusStep} markerRef={stepMarker} />
 
       {scored.map((r, i) => i !== selected && (

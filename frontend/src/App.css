@@ -153,6 +153,8 @@ html, body, #root { margin: 0; height: 100%; overflow: hidden; }
 .nav-dist { font-size: 30px; font-weight: 900; line-height: 1.05; }
 .nav-instr { font-size: 17px; font-weight: 600; opacity: 0.95; margin-top: 2px; }
 .nav-then { grid-column: 2; background: #095c42; padding: 6px 16px; font-size: 13px; font-weight: 600; }
+.turn-icon { display: block; flex-shrink: 0; }
+.nav-then .turn-icon { display: inline-block; vertical-align: -3px; margin: 0 2px; }
 .nav-toast { position: absolute; top: 150px; left: 450px; max-width: 560px; background: rgba(11,19,38,0.96); color: #fde68a;
   border: 1px solid; border-left-width: 5px; border-radius: 12px; padding: 10px 14px; font-size: 13px; font-weight: 600;
   box-shadow: 0 12px 30px rgba(0,0,0,0.6); animation: pop 0.25s ease-out; }
@@ -172,7 +174,7 @@ html, body, #root { margin: 0; height: 100%; overflow: hidden; }
 .nav-btn.on { border-color: #38bdf8; color: #38bdf8; }
 .nav-btn.exit { background: #7f1d1d; border-color: #b91c1c; color: #fff; }
 .nav-btn:disabled { opacity: 0.4; }
-.nav-truck { width: 44px; height: 44px; transition: transform 0.15s linear; filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5)); }
+.nav-truck { width: 44px; height: 44px; filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5)); }
 .nav-truck svg { width: 100%; height: 100%; }
 .steps li.cur button { border-color: #22c55e; background: rgba(20,83,45,0.6); }
 .map-ui.navigating .map-legend { display: none; }

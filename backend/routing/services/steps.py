@@ -4,6 +4,8 @@
 
 `span` indexes into the route geometry so the UI can highlight the step's stretch.
 """
+import re
+
 M_PER_MI = 1609.34
 
 # ORS instruction type codes -> our maneuver_type
@@ -24,8 +26,9 @@ def from_ors(segments, geometry):
             continue  # leg 2 "depart" from the via-point
         i0, i1 = (s.get('way_points') or [0, 0])[:2]
         name = s.get('name') or ''
-        out.append(_step(s.get('instruction') or '', '' if name == '-' else name, s.get('distance', 0),
-                         s.get('duration', 0), mtype, geometry[min(i0, len(geometry) - 1)], [i0, i1]))
+        text = s.get('instruction') or ''
+        out.append(_step(text, '' if name == '-' else name, s.get('distance', 0),
+                         s.get('duration', 0), reconcile(text, mtype), geometry[min(i0, len(geometry) - 1)], [i0, i1]))
     return out
 
 
@@ -82,13 +85,38 @@ def osrm_maneuver(step):
         return 'uturn'
     if typ in ('roundabout', 'rotary', 'roundabout turn'):
         return 'roundabout'
+    side = 'left' if 'left' in mod else 'right' if 'right' in mod else ''
     if typ == 'off ramp':
-        return 'exit'
+        return f'exit-{side or "right"}'  # US exits are on the right unless OSRM says otherwise
     if typ in ('on ramp', 'merge'):
-        return 'merge'
+        return f'merge-{side}' if side else 'merge'
     if typ == 'fork':
-        return 'keep-left' if 'left' in mod else 'keep-right'
+        return 'keep-left' if side == 'left' else 'keep-right'
     return mod or 'straight'
+
+
+# "Turn right ...", "Keep left ...", "Turn sharp left ...", "Bear slight right ...", "Merge left".
+# Only the leading verb phrase counts, so a road called "Left Hand Canyon Rd" can't flip it.
+_TEXT_SIDE = re.compile(r'^(?:at the end of the road, )?(?:turn|keep|bear|merge|make a|veer)\s+'
+                        r'(?:sharp\s+|slight\s+)?(left|right)\b', re.I)
+
+
+def reconcile(text, mtype):
+    """Make maneuver_type agree with the instruction's own left/right word.
+
+    The icon is drawn from maneuver_type and the banner shows the text, so they must
+    never disagree. If the provider's code and its own text differ, the text wins
+    (it is what the driver reads and hears).
+    """
+    m = _TEXT_SIDE.match((text or '').strip())
+    if not m or mtype in ('depart', 'arrive', 'roundabout', 'uturn'):
+        return mtype
+    side, other = m.group(1).lower(), 'right' if m.group(1).lower() == 'left' else 'left'
+    if side in mtype:
+        return mtype
+    if other in mtype:
+        return mtype.replace(other, side)
+    return {'straight': f'slight-{side}', 'merge': f'merge-{side}'}.get(mtype, side)
 
 
 def from_osrm(legs, geometry):
@@ -107,8 +135,9 @@ def from_osrm(legs, geometry):
     for s in raw:
         lon, lat = s['maneuver']['location']
         idx = _nearest_forward(geometry, idx, lon, lat)
-        out.append(_step(osrm_instruction(s), osrm_road(s), s.get('distance', 0), s.get('duration', 0),
-                         osrm_maneuver(s), geometry[idx], [idx, idx]))
+        text = osrm_instruction(s)
+        out.append(_step(text, osrm_road(s), s.get('distance', 0), s.get('duration', 0),
+                         reconcile(text, osrm_maneuver(s)), geometry[idx], [idx, idx]))
     for a, b in zip(out, out[1:]):
         a['span'][1] = b['span'][0]
     return out

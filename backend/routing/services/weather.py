@@ -1,5 +1,6 @@
 """Open-Meteo forecast helpers (no API key): https://open-meteo.com/en/docs"""
 import math
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -66,6 +67,23 @@ def sample_checkpoints(geometry, duration_s, departure, interval_miles=25):
 
 HOURLY = 'wind_speed_10m,wind_gusts_10m,precipitation,rain,snowfall,temperature_2m'
 
+FETCH_ATTEMPTS = 3
+FETCH_TIMEOUT_S = 12
+FETCH_BUDGET_S = 25   # per batch, retries included
+RETRY_STATUS = (429, 500, 502, 503, 504)
+MAX_BACKOFF_S = 6
+_SLOTS = threading.BoundedSemaphore(6)
+
+
+def _backoff(attempt, retry_after=None):
+    """Seconds to wait before retry `attempt + 1`: Retry-After if given (capped), else 1.5 s, 3 s."""
+    try:
+        if retry_after is not None:
+            return min(MAX_BACKOFF_S, max(0.0, float(retry_after)))
+    except ValueError:
+        pass  # HTTP-date form: fall back to exponential backoff
+    return min(MAX_BACKOFF_S, 1.5 * (2 ** attempt))
+
 
 def _fetch(lats, lons, forecast_days=3):
     """One Open-Meteo call for many points (it accepts comma-separated lists)."""
@@ -79,12 +97,29 @@ def _fetch(lats, lons, forecast_days=3):
         'timezone': 'UTC',
         'forecast_days': forecast_days,  # forecast starts at 00:00 UTC today
     }
-    # Retry once on rate limits / server hiccups, which the free API sometimes returns.
-    for attempt in range(2):
-        resp = HTTP.get(OPEN_METEO_URL, timeout=15, params=params)
-        if resp.status_code not in (429, 500, 502, 503, 504):
+    # The free API answers 429 when too many locations are requested per minute from
+    # one IP (each location counts as a call; shared serverless IPs hit it sooner), and
+    # occasionally 5xx or a slow read. Retry with backoff, honouring Retry-After, within
+    # a fixed budget so the whole request still fits the serverless time limit.
+    deadline = time.monotonic() + FETCH_BUDGET_S
+    for attempt in range(FETCH_ATTEMPTS):
+        last = attempt == FETCH_ATTEMPTS - 1
+        try:
+            with _SLOTS:  # cap concurrent Open-Meteo calls across routes and requests
+                resp = HTTP.get(OPEN_METEO_URL, params=params,
+                                timeout=max(1.0, min(FETCH_TIMEOUT_S, deadline - time.monotonic())))
+        except (requests.Timeout, requests.ConnectionError):
+            wait = _backoff(attempt)
+            if last or time.monotonic() + wait + 2 > deadline:
+                raise
+            time.sleep(wait)
+            continue
+        if resp.status_code not in RETRY_STATUS or last:
             break
-        time.sleep(2)
+        wait = _backoff(attempt, resp.headers.get('Retry-After'))
+        if time.monotonic() + wait + 2 > deadline:
+            break  # no time left for another try: report the error now
+        time.sleep(wait)
     resp.raise_for_status()
     data = resp.json()
     return data if isinstance(data, list) else [data]

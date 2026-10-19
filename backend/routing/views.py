@@ -50,8 +50,13 @@ def routes(request):
     try:
         all_forecasts = list(ROUTE_POOL.map(lambda cps: weather.get_forecasts(cps, with_series=True), all_cps))
     except requests.RequestException as e:
-        return Response({'error': f'Weather service (Open-Meteo) failed: {type(e).__name__}'},
-                        status=status.HTTP_502_BAD_GATEWAY)
+        # Status code only (e.g. "HTTPError 429" = rate limited); never the URL.
+        code = getattr(getattr(e, 'response', None), 'status_code', None)
+        detail = f'{type(e).__name__} {code}' if code else type(e).__name__
+        msg = f'Weather service (Open-Meteo) failed: {detail}'
+        if code == 429:
+            msg += ' (rate limited, try again in a minute)'
+        return Response({'error': msg}, status=status.HTTP_502_BAD_GATEWAY)
 
     out = []
     for i, (r, cps, forecasts) in enumerate(zip(raw_routes, all_cps, all_forecasts)):
